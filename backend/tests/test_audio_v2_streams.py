@@ -92,3 +92,31 @@ async def test_recovered_capture_has_no_realtime_stream_or_groups():
 async def test_stream_entries_reject_freeform_fields():
     with pytest.raises(ValueError, match="only the event field"):
         parse_stream_event({b"event": _opened().SerializeToString(), b"codec": b"pcm"})
+
+
+async def test_published_frames_keep_the_session_idle_watchdog_fed():
+    # The conversation watchdog closes a conversation once last_chunk_at is 30 s
+    # old. A streaming v2 capture must refresh it, or every live conversation is
+    # closed as "device stopped streaming" 30 s after it starts.
+    import time
+
+    from backend.services.audio_stream.session_store import SessionStore
+
+    redis_client = fake_aioredis.FakeRedis()
+    store = SessionStore(redis_client)
+    streams = await AudioV2Streams.open(
+        redis_client,
+        event=_opened(),
+        delivery_class=audio_pb2.DELIVERY_CLASS_LIVE,
+    )
+    frame = _frame(audio_pb2.DELIVERY_CLASS_LIVE)
+
+    frame.frame.sequence = 1
+    await streams.publish_frame(frame)
+    assert await store.get_last_chunk_at("capture-1") is None  # throttled: not every frame
+
+    before = time.time()
+    frame.frame.sequence = 50
+    await streams.publish_frame(frame)
+    last_chunk_at = await store.get_last_chunk_at("capture-1")
+    assert last_chunk_at is not None and last_chunk_at >= before

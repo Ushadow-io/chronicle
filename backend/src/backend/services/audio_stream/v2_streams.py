@@ -7,13 +7,16 @@ not part of this interface.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from redis.exceptions import ResponseError
 
 from backend.audio_contract.v2 import audio_pb2
+from backend.redis_keys import audio_session
 
 EVENT_FIELD = b"event"
+_LIVENESS_EVERY_FRAMES = 50  # 50 canonical 20 ms frames = 1 s
 DURABLE_GROUP = "audio-persistence-v2"
 REALTIME_GROUPS = (
     "streaming-transcription-v2",
@@ -102,6 +105,13 @@ class AudioV2Streams:
         await self.redis_client.xadd(self.durable, payload)
         if self.delivery_class == audio_pb2.DELIVERY_CLASS_LIVE:
             await self.redis_client.xadd(self.realtime, payload)
+        # The conversation idle watchdog and the transcription inflow check read the
+        # session's last_chunk_at; without this they see a v2 capture as silent and
+        # close its conversation after 30 s. Refresh about once a second.
+        if frame.sequence % _LIVENESS_EVERY_FRAMES == 0:
+            await self.redis_client.hset(
+                audio_session(self.capture_session_id), "last_chunk_at", str(time.time())
+            )
 
     async def end(self, event: audio_pb2.CaptureStreamEvent) -> None:
         if event.WhichOneof("event") not in {"ended", "failed"}:

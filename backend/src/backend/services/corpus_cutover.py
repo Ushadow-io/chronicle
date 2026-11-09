@@ -19,6 +19,7 @@ from bson import ObjectId
 from backend.models.audio_capture import (
     AbsoluteWord,
     AudioRangeRef,
+    CaptureEffects,
     DiarizationTurn,
     TranscriptUtterance,
 )
@@ -544,6 +545,12 @@ def plan_capture_corpus(
                     else None
                 ),
                 "external_source_id": f"capture-cutover:{_stable_id('external-session', session_key)}",
+                # Pre-cutover audio carries no capture provenance, so it is recorded as
+                # imported: epoch zero, no effect claims, no voice session.
+                "capture_epoch": 0,
+                "processing_profile": "imported",
+                "effects": CaptureEffects.not_applicable().model_dump(mode="python"),
+                "voice_session_id": None,
                 "content_sha256": None,
                 "data_purpose": (
                     next(iter(purposes)) if len(purposes) == 1 else "normal_capture"
