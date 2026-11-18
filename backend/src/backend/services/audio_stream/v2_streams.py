@@ -20,6 +20,10 @@ REALTIME_GROUPS = (
     "wakeword-v2",
     "interactive-turn-v2",
 )
+# The realtime stream is live delivery only; durability is the durable stream's job.
+# It expires this long after its last entry, so an ended or abandoned capture cannot
+# hold its audio in Redis forever.
+REALTIME_IDLE_TTL_SECONDS = 3600
 
 
 def durable_stream(capture_session_id: str) -> str:
@@ -85,10 +89,14 @@ class AudioV2Streams:
         await redis_client.xadd(streams.durable, payload)
         await _create_group(redis_client, streams.durable, DURABLE_GROUP)
         if delivery_class == audio_pb2.DELIVERY_CLASS_LIVE:
-            await redis_client.xadd(streams.realtime, payload)
+            await streams._add_realtime(payload)
             for group in REALTIME_GROUPS:
                 await _create_group(redis_client, streams.realtime, group)
         return streams
+
+    async def _add_realtime(self, payload: dict[bytes, bytes]) -> None:
+        await self.redis_client.xadd(self.realtime, payload)
+        await self.redis_client.expire(self.realtime, REALTIME_IDLE_TTL_SECONDS)
 
     async def publish_frame(self, event: audio_pb2.CaptureStreamEvent) -> None:
         if event.WhichOneof("event") != "frame":
@@ -101,7 +109,7 @@ class AudioV2Streams:
         payload = {EVENT_FIELD: event.SerializeToString()}
         await self.redis_client.xadd(self.durable, payload)
         if self.delivery_class == audio_pb2.DELIVERY_CLASS_LIVE:
-            await self.redis_client.xadd(self.realtime, payload)
+            await self._add_realtime(payload)
 
     async def end(self, event: audio_pb2.CaptureStreamEvent) -> None:
         if event.WhichOneof("event") not in {"ended", "failed"}:
@@ -109,7 +117,7 @@ class AudioV2Streams:
         payload = {EVENT_FIELD: event.SerializeToString()}
         await self.redis_client.xadd(self.durable, payload)
         if self.delivery_class == audio_pb2.DELIVERY_CLASS_LIVE:
-            await self.redis_client.xadd(self.realtime, payload)
+            await self._add_realtime(payload)
 
 
 def parse_stream_event(fields: dict[bytes, bytes]) -> audio_pb2.CaptureStreamEvent:

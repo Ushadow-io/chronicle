@@ -8,6 +8,7 @@ from backend.audio_contract.v2 import audio_pb2
 from backend.services.audio_stream.v2_streams import (
     DURABLE_GROUP,
     REALTIME_GROUPS,
+    REALTIME_IDLE_TTL_SECONDS,
     AudioV2Streams,
     parse_stream_event,
 )
@@ -92,3 +93,18 @@ async def test_recovered_capture_has_no_realtime_stream_or_groups():
 async def test_stream_entries_reject_freeform_fields():
     with pytest.raises(ValueError, match="only the event field"):
         parse_stream_event({b"event": _opened().SerializeToString(), b"codec": b"pcm"})
+
+
+async def test_live_realtime_stream_expires_after_idle_but_durable_does_not():
+    """Realtime delivery is not storage: an abandoned capture must age out."""
+    redis_client = fake_aioredis.FakeRedis()
+    streams = await AudioV2Streams.open(
+        redis_client,
+        event=_opened(),
+        delivery_class=audio_pb2.DELIVERY_CLASS_LIVE,
+    )
+    await streams.publish_frame(_frame(audio_pb2.DELIVERY_CLASS_LIVE))
+
+    realtime_ttl = await redis_client.ttl(streams.realtime)
+    assert 0 < realtime_ttl <= REALTIME_IDLE_TTL_SECONDS
+    assert await redis_client.ttl(streams.durable) == -1

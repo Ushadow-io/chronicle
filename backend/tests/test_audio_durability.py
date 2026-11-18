@@ -59,6 +59,7 @@ class _DurabilityRedis:
         self.delivered_count = 0
         self.group = "audio_persistence"
         self.stream = b"audio:stream:session-1"
+        self.deleted = []
 
     async def xgroup_create(self, stream, group, *args, **kwargs):
         self.group = group
@@ -110,6 +111,7 @@ class _DurabilityRedis:
         ]
 
     async def delete(self, *keys):
+        self.deleted.extend(keys)
         return len(keys)
 
 
@@ -163,6 +165,17 @@ def _v2_message(message_id=b"1-0"):
             captured_at=captured_at,
             delivery_class=audio_pb2.DELIVERY_CLASS_RECOVERED,
             pcm_s16le=b"\x00\x01" * 160000,
+        )
+    )
+    return message_id, {b"event": event.SerializeToString()}
+
+
+def _v2_ended_message(message_id=b"2-0"):
+    event = audio_pb2.CaptureStreamEvent(
+        ended=audio_pb2.CaptureStreamEnded(
+            binding=audio_pb2.CaptureBinding(
+                capture_session_id=audio_pb2.CaptureSessionId(value="session-1")
+            )
         )
     )
     return message_id, {b"event": event.SerializeToString()}
@@ -290,6 +303,77 @@ async def test_v2_recovered_frame_commits_from_typed_durable_stream(monkeypatch)
     assert inserted[0].original_size == 320000
     assert redis.acked == [b"1-0"]
     assert capture.time_basis == "captured"
+
+
+@pytest.mark.asyncio
+async def test_v2_durable_stream_is_deleted_once_drained_after_terminal_event(
+    monkeypatch,
+):
+    """A fully committed v2 WAL must not stay in Redis after its capture ends."""
+
+    class SuccessfulAudioChunk:
+        source_stream = _QueryField()
+        source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        async def insert(self):
+            return None
+
+    _patch_persistence_dependencies(monkeypatch, SuccessfulAudioChunk)
+    redis = _DurabilityRedis(
+        statuses=[SessionStatus.ACTIVE, SessionStatus.FINISHED],
+        new_message=[_v2_message(), _v2_ended_message()],
+    )
+
+    await audio_jobs.audio_streaming_persistence_job.__wrapped__(
+        "session-1",
+        "user-1",
+        "client-1",
+        contract_version=2,
+        redis_client=redis,
+    )
+
+    assert redis.acked == [b"1-0", b"2-0"]
+    assert "audio:v2:durable:session-1" in redis.deleted
+
+
+@pytest.mark.asyncio
+async def test_v2_durable_stream_is_kept_without_terminal_event(monkeypatch):
+    """Before the terminal event the producer may still append to the stream."""
+
+    class SuccessfulAudioChunk:
+        source_stream = _QueryField()
+        source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        async def insert(self):
+            return None
+
+    _patch_persistence_dependencies(monkeypatch, SuccessfulAudioChunk)
+    redis = _DurabilityRedis(
+        statuses=[SessionStatus.ACTIVE, SessionStatus.FINISHED],
+        new_message=_v2_message(),
+    )
+
+    await audio_jobs.audio_streaming_persistence_job.__wrapped__(
+        "session-1",
+        "user-1",
+        "client-1",
+        contract_version=2,
+        redis_client=redis,
+    )
+
+    assert "audio:v2:durable:session-1" not in redis.deleted
 
 
 @pytest.mark.asyncio

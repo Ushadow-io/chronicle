@@ -521,6 +521,11 @@ async def audio_streaming_persistence_job(
         await completed_capture.set({"status": "complete"})
 
     await redis_client.delete(f"audio_persistence:session:{session_id}")
+    # The group is drained, so every v2 WAL entry is committed to Mongo and ACKed;
+    # this worker is the stream's only reader. Delete it only after the terminal
+    # event: before that, the producer could still append and recreate the key.
+    if contract_version == 2 and end_signal_received:
+        await redis_client.delete(audio_stream_name)
     logger.info(
         f"🎵 Durable audio persistence complete for session {session_id}: "
         f"{total_mongo_chunks_written} new Mongo chunks, "
