@@ -187,8 +187,8 @@ async def test_unverified_email_never_links_or_claims_the_address(issuer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("claim", ["email_verified", "emailVerified"])
-async def test_verified_email_links_the_existing_account(issuer, claim):
-    existing = await _existing_user(email="Alice@Example.com")
+async def test_verified_email_links_a_verified_local_account(issuer, claim):
+    existing = await _existing_user(email="Alice@Example.com", is_verified=True)
     user = await _read(issuer.token(**{claim: True}))
     assert user.id == existing.id
     assert (await User.get(existing.id)).oidc_sub == "casdoor-user-1"
@@ -196,22 +196,37 @@ async def test_verified_email_links_the_existing_account(issuer, claim):
 
 @pytest.mark.asyncio
 async def test_unverified_email_links_only_when_the_setting_allows_it(issuer):
-    existing = await _existing_user()
+    existing = await _existing_user(is_verified=True)
     _allow_unverified_email_link()
     user = await _read(issuer.token())
     assert user.id == existing.id
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("allow_unverified_token_email", [False, True])
+async def test_unverified_local_account_is_never_linked_or_duplicated(
+    issuer, allow_unverified_token_email
+):
+    """Pre-hijacking: a local sign-up with the victim's email must not inherit their sign-in."""
+    squatter = await _existing_user(is_verified=False)
+    if allow_unverified_token_email:
+        _allow_unverified_email_link()  # relaxes the token side only
+    assert await _read(issuer.token(email_verified=True)) is None
+    assert (await User.get(squatter.id)).oidc_sub is None
+    assert await User.find({"oidc_sub": "casdoor-user-1"}).count() == 0
+    assert await User.find({"email": "alice@example.com"}).count() == 1
+
+
+@pytest.mark.asyncio
 async def test_email_never_links_to_a_superuser(issuer):
-    await _existing_user(is_superuser=True)
+    await _existing_user(is_superuser=True, is_verified=True)
     assert await _read(issuer.token(email_verified=True)) is None
     assert await User.find({"oidc_sub": "casdoor-user-1"}).count() == 0
 
 
 @pytest.mark.asyncio
 async def test_email_never_relinks_an_account_owned_by_another_sub(issuer):
-    owned = await _existing_user(oidc_sub="someone-else")
+    owned = await _existing_user(oidc_sub="someone-else", is_verified=True)
     assert await _read(issuer.token(email_verified=True)) is None
     assert (await User.get(owned.id)).oidc_sub == "someone-else"
 

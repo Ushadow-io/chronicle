@@ -6,9 +6,9 @@ Off unless ``OIDC_ISSUER`` and ``OIDC_AUDIENCE`` are both set. See docs/oidc-log
 - ``OIDC_AUDIENCE``: the client id; must be in the token ``aud``.
 - ``OIDC_JWKS_URL``: optional, default ``{OIDC_ISSUER}/.well-known/jwks`` (Casdoor's path).
   Set it when Chronicle reaches the issuer at a different (internal) address.
-- ``OIDC_LINK_UNVERIFIED_EMAIL``: ``true`` links a first-time token to an existing account by
-  email even when the token does not say the email is verified. Default off: without proof of
-  ownership an email match is an account takeover.
+- ``OIDC_LINK_UNVERIFIED_EMAIL``: ``true`` trusts the token's email even when the token does not
+  say it is verified. Default off: without proof of ownership an email match is an account
+  takeover. It relaxes the TOKEN side only, never the local-account check below.
 
 Token checks: RS256 only, key from the issuer's JWKS by ``kid``, ``iss``/``aud``/``exp``/``sub``
 required, and ``tokenType`` (Casdoor) must be ``access-token`` when present, so refresh and id
@@ -16,8 +16,11 @@ tokens are not accepted as bearers. A token the issuer did not sign is ``None`` 
 that cannot be fetched raises ``OIDCUnavailableError`` (503), never "invalid credentials".
 
 Users: matched by ``oidc_sub`` == token ``sub``. A first-time ``sub`` links to the account with
-the same email only when the email is trusted (see above) and that account is not a superuser
-and not linked to another ``sub``; otherwise a new normal user is created. Claims never grant
+the same email only when the token email is trusted (see above) AND that local account is
+``is_verified`` (else anyone could pre-register a victim's email locally and inherit the
+victim's sign-in), not a superuser and not linked to another ``sub``. Any of those failing is
+a refusal (an admin links by setting ``users.oidc_sub``), never a second account with the same
+email. No local account with that email: a new normal user is created. Claims never grant
 superuser. The user's Mongo ObjectId stays its id everywhere.
 """
 
@@ -283,19 +286,35 @@ def _trusted_email(claims: dict, config: OIDCConfig) -> Optional[str]:
     return email if verified or config.link_unverified_email else None
 
 
+# Same message for every refused link: the caller only gets a 401, and the log names the reason.
+LINK_REFUSED = "Sign-in matches an existing account that cannot be linked automatically"
+
+
+def _link_refusal(user: User) -> Optional[str]:
+    """Why ``user`` must not be linked by email, or None when it may be."""
+    if user.is_superuser:
+        return "it is a superuser (an email claim never confers superuser)"
+    if user.oidc_sub:
+        return "it is already linked to another sub"
+    if not user.is_verified:
+        # A local sign-up does not prove the email: whoever registered it would share the
+        # victim's account once the victim signs in through the issuer (pre-hijacking).
+        return "its email is not verified locally"
+    return None
+
+
 async def _link_by_email(email: str, sub: str) -> Optional[User]:
     user = await BeanieUserDatabase(User).get_by_email(email)
     if user is None:
         return None
-    if user.is_superuser:
-        # An email claim never confers superuser. Link an admin by setting users.oidc_sub.
+    refusal = _link_refusal(user)
+    if refusal is not None:
         logger.warning(
-            f"OIDC: not linking sub {sub} to superuser {user.user_id} by email"
+            f"OIDC: not linking sub {sub} to existing user {user.user_id} by email: "
+            f"{refusal}. An admin can link it by setting users.oidc_sub = {sub!r} on that "
+            f"account after confirming who owns it."
         )
-        raise OIDCTokenError("Email belongs to an administrator account")
-    if user.oidc_sub:
-        logger.warning(f"OIDC: user {user.user_id} is already linked to another sub")
-        raise OIDCTokenError("Email belongs to an account linked to another identity")
+        raise OIDCTokenError(LINK_REFUSED)
     result = await User.get_pymongo_collection().update_one(
         {"_id": user.id, "oidc_sub": None}, {"$set": {"oidc_sub": sub}}
     )
