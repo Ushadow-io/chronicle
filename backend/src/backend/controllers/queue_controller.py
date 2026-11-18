@@ -1196,7 +1196,6 @@ def start_post_conversation_jobs(
     """
     # Lazy import: circular dependency with the `workers` package (its __init__
     # imports back from this module).
-    from backend.services.timeline.dispatch import finalize_conversation_close_job
     from backend.workers.conversation_jobs import (
         dispatch_conversation_complete_event_job,
     )
@@ -1217,15 +1216,15 @@ def start_post_conversation_jobs(
     # Raw capture Conversations keep evidence producers such as transcription,
     # speaker recognition, and VAD, but do not receive semantic summaries or memory.
     # Stable Episode revisions own bounded summaries and a reviewed day snapshot owns
-    # the single vault proposal. The plugin event waits for Episode settlement.
-    defer_to_timeline = not memory_space_id
-    if defer_to_timeline:
+    # the single vault proposal. conversation.complete still fires at close (below):
+    # a closed recording with a saved transcript is complete without reconciliation.
+    if not memory_space_id:
         skip_memory_extraction = True
         # Capture fragments are evidence, not semantic conversations. Timeline may
         # join several fragments or use only a bounded slice of one.
         skip_title_summary = True
         logger.info(
-            "⏭️  Summaries and user-facing dispatch for "
+            "⏭️  Summaries for "
             f"recording {conversation_id[:8]} deferred to Timeline classification"
         )
     if memory_space_id:
@@ -1398,14 +1397,10 @@ def start_post_conversation_jobs(
 
     # Enqueue event dispatch job (may have no dependencies if all jobs were skipped)
     # The terminal job is never skippable: it owns end_reason, completed_at, and the
-    # reconciled processing_status. For Timeline capture it is the finalize-only variant,
-    # which does that same work and dispatches nothing.
+    # reconciled processing_status, then fires conversation.complete once for this
+    # conversation. Timeline settlement publishes episode.settled, never this event.
     event_dispatch_job = default_queue.enqueue(
-        (
-            finalize_conversation_close_job
-            if defer_to_timeline
-            else dispatch_conversation_complete_event_job
-        ),
+        dispatch_conversation_complete_event_job,
         conversation_id,
         client_id or "",
         user_id,

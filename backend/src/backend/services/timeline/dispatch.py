@@ -3,8 +3,9 @@
 A recording close is evidence, not a semantic claim. Rolling source Conversations get
 neither semantic summaries nor memory. A settled or structurally human-confirmed
 conversational Episode may enqueue one scope-fenced detailed summary when its exact
-revision is in a ready/reviewed day snapshot. Only settlement dispatches the user-facing
-completion event. Explicitly reviewed selections independently own vault proposals. Latches are claimed before side effects and released on failure so recovery
+revision is in a ready/reviewed day snapshot. Settlement dispatches ``episode.settled``;
+``conversation.complete`` already fired once per recording when it closed (queue
+controller), so settlement never repeats it. Explicitly reviewed selections independently own vault proposals. Latches are claimed before side effects and released on failure so recovery
 remains at-least-once.
 """
 
@@ -13,12 +14,11 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from pymongo.errors import DuplicateKeyError
 
 from backend.models.conversation import Conversation
-from backend.models.job import async_job
 from backend.models.timeline import (
     EpisodeDispatchLatch,
     TimelineDay,
@@ -29,7 +29,6 @@ from backend.models.timeline import (
 from backend.plugins.events import PluginEvent
 from backend.services.memory.visibility import conversation_scope_filter
 from backend.services.plugin_service import dispatch_plugin_event
-from backend.services.sse_publisher import publish_sse_event
 
 from .episode_summary import (
     SUMMARY_DAY_STATES,
@@ -41,7 +40,7 @@ from .recording_refs import episode_conversation_ids, resolve_live_recordings
 
 logger = logging.getLogger(__name__)
 
-CONVERSATION_COMPLETE = PluginEvent.CONVERSATION_COMPLETE.value
+EPISODE_SETTLED = PluginEvent.EPISODE_SETTLED.value
 EPISODE_DETAILED_SUMMARY = "episode.detailed_summary"
 SUMMARY_DISPATCH_LEASE = timedelta(minutes=10)
 
@@ -70,7 +69,7 @@ async def _related_conversations(episode: TimelineEpisode) -> list[Conversation]
 async def _fire_plugins(
     episode: TimelineEpisode, conversations: list[Conversation]
 ) -> None:
-    """Publish the user-facing completion event only after Episode settlement."""
+    """Publish the settled Episode (merged transcript, title, summary, member ids)."""
 
     transcript = "\n".join(
         conversation.transcript
@@ -79,7 +78,7 @@ async def _fire_plugins(
     )
     conversation_ids = [item.conversation_id for item in conversations]
     await dispatch_plugin_event(
-        event=PluginEvent.CONVERSATION_COMPLETE,
+        event=PluginEvent.EPISODE_SETTLED,
         user_id=episode.user_id,
         data={
             "conversation": {
@@ -389,7 +388,7 @@ async def _episode_dispatch_state(
             {
                 "user_id": episode.user_id,
                 "episode_key": episode.episode_key,
-                "event_type": CONVERSATION_COMPLETE,
+                "event_type": EPISODE_SETTLED,
             },
             {"_id": 1},
         )
@@ -512,12 +511,12 @@ async def dispatch_classified_episodes(
                 episode.status,
             )
         if episode.status == "settled" and await _claim_and_fire(
-            episode, CONVERSATION_COMPLETE, _fire_plugins, conversations
+            episode, EPISODE_SETTLED, _fire_plugins, conversations
         ):
             events_dispatched.append(episode.episode_key)
             logger.info(
                 "📌 Dispatched %s for settled episode %s (revision %s)",
-                CONVERSATION_COMPLETE,
+                EPISODE_SETTLED,
                 episode.episode_key,
                 episode.revision,
             )
@@ -585,86 +584,3 @@ async def dispatch_ready_episodes(limit: int = 200) -> dict[str, int]:
             len(dispatched_keys),
         )
     return {"unlatched": due_count, "dispatched": len(dispatched_keys)}
-
-
-@async_job(redis=True, beanie=True)
-async def finalize_conversation_close_job(
-    conversation_id: str,
-    client_id: str,
-    user_id: str,
-    end_reason: Optional[str] = None,
-    trigger: str = "",
-    *,
-    redis_client=None,
-) -> dict[str, Any]:
-    """Terminal close-path job for rolling users: settle state, dispatch nothing.
-
-    ``dispatch_conversation_complete_event_job`` does two separable things: it owns the
-    conversation's final ``end_reason``/``completed_at``/``processing_status``, and it
-    fires ``conversation.complete``. Under rolling reconciliation only the first still
-    belongs to the close path. This job is that half; it disappears when the day
-    pipeline is removed at cutover and the remaining finalizer stops dispatching.
-    """
-
-    # Imported here to break the import cycle with the workers package, which imports
-    # the queue controller and hence this package's dirty-range trigger.
-    from backend.workers.conversation_jobs import request_conversation_context_jobs
-
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
-    if not conversation:
-        logger.error(f"Conversation {conversation_id} not found")
-        return {"success": False, "error": "Conversation not found"}
-
-    needs_save = False
-    if end_reason and conversation.end_reason is None:
-        try:
-            conversation.end_reason = Conversation.EndReason(end_reason)
-        except ValueError:
-            logger.error(
-                "⚠️ %s is not a Conversation.EndReason (conversation %s); "
-                "storing UNKNOWN",
-                end_reason,
-                conversation_id,
-            )
-            conversation.end_reason = Conversation.EndReason.UNKNOWN
-        needs_save = True
-
-    if conversation.completed_at is None:
-        conversation.completed_at = utcnow()
-        needs_save = True
-
-    if conversation.apply_status(settled=True):
-        needs_save = True
-
-    if needs_save:
-        await conversation.save()
-
-    try:
-        await request_conversation_context_jobs(conversation)
-    except Exception as exc:
-        logger.warning(
-            "Failed to request device context for conversation %s: %s",
-            conversation_id,
-            exc,
-        )
-
-    publish_sse_event(
-        user_id,
-        "conversation.completed",
-        {
-            "conversation_id": conversation_id,
-            "end_reason": (
-                conversation.end_reason.value if conversation.end_reason else None
-            ),
-            "trigger": trigger,
-        },
-    )
-    logger.info(
-        "🏁 Finalized conversation %s status=%s (rolling: events fire on episode "
-        "settlement)",
-        conversation_id[:12],
-        conversation.processing_status,
-    )
-    return {"success": True, "conversation_id": conversation_id, "dispatched": False}

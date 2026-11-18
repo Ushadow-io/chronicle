@@ -28,6 +28,10 @@ class PluginEvent(str, Enum):
         "conversation.complete",
         "Fires when conversation processing finishes (transcript ready)",
     )
+    EPISODE_SETTLED = (
+        "episode.settled",
+        "Fires when a Timeline episode settles (merged transcript, title, summary)",
+    )
     TRANSCRIPT_STREAMING = (
         "transcript.streaming",
         "Real-time transcript segments during a live conversation",

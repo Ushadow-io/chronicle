@@ -1,4 +1,4 @@
-"""Classification-gated dispatch: the latch, its rollback, and the gated close path.
+"""Classification-gated dispatch: the latch, its rollback, and the close path.
 
 Real MongoDB documents, because the property under test is the unique
 ``(episode_key, event_type)`` latch — a faked collection would be testing the fake.
@@ -29,6 +29,7 @@ from backend.models.timeline import (
     TimelinePublicationDayPlan,
     TimelinePublicationJournal,
 )
+from backend.plugins.events import PluginEvent
 from backend.services.timeline import dispatch as dispatch_module
 from backend.services.timeline.dispatch import (
     dispatch_classified_episodes,
@@ -1065,7 +1066,7 @@ async def test_recovery_scan_does_not_hydrate_terminal_completion_latches(
         {
             "user_id": USER,
             "episode_key": episode.episode_key,
-            "event_type": "conversation.complete",
+            "event_type": "episode.settled",
             "episode_id": episode.episode_id,
             "revision": episode.revision,
             "dispatched_at": START,
@@ -1197,7 +1198,9 @@ def _close_path_fakes(monkeypatch):
     return queue_controller, queues
 
 
-def test_close_path_skips_memory_and_plugin_dispatch(monkeypatch):
+def test_close_path_skips_memory_and_fires_completion_without_reconciliation(
+    monkeypatch,
+):
     queue_controller, queues = _close_path_fakes(monkeypatch)
 
     jobs = queue_controller.start_post_conversation_jobs(
@@ -1209,15 +1212,43 @@ def test_close_path_skips_memory_and_plugin_dispatch(monkeypatch):
     assert jobs["title"] is None
     assert jobs["short_summary"] is None
     assert jobs["detailed_summary"] is None
-    # The terminal job still runs — it owns end_reason/completed_at/status — but it is
-    # the finalize-only variant that dispatches no user-facing event.
-    assert [name for name, _ in queues["default"].enqueued] == [
-        "finalize_conversation_close_job"
+    # The terminal job owns end_reason/completed_at/status and fires
+    # conversation.complete at close. It waits only for the close chain (here the
+    # speaker job), never for Timeline reconciliation or episode settlement.
+    [(name, kwargs)] = queues["default"].enqueued
+    assert name == "dispatch_conversation_complete_event_job"
+    assert [job.id for job in kwargs["depends_on"]] == [
+        queues["transcription"].enqueued[0][1]["job_id"]
     ]
     # Evidence producers are untouched.
     assert [name for name, _ in queues["transcription"].enqueued] == [
         "recognise_speakers_job"
     ]
+
+
+@pytest.mark.asyncio
+async def test_settlement_publishes_episode_settled_never_a_second_completion(
+    documents, monkeypatch
+):
+    """conversation.complete fired at close; settlement must not repeat it."""
+
+    fake = _Recorder()
+    monkeypatch.setattr(
+        dispatch_module, "dispatch_plugin_event", fake.dispatch_plugin_event
+    )
+    monkeypatch.setattr(
+        dispatch_module,
+        "_enqueue_episode_summary_job",
+        _enqueue_episode_summary_job_with(fake),
+    )
+    await _conversation("conv-one")
+    episode = await _episode(conversations=["conv-one"])
+
+    await dispatch_classified_episodes(USER, [episode.episode_id])
+    await dispatch_classified_episodes(USER, [episode.episode_id])
+
+    assert [call["event"] for call in fake.events] == [PluginEvent.EPISODE_SETTLED]
+    assert fake.events[0]["data"]["related_conversation_ids"] == ["conv-one"]
 
 
 def test_space_close_path_waits_for_scoped_review(monkeypatch):

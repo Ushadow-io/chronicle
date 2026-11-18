@@ -82,10 +82,12 @@ transition both pipelines publish into `timeline_episodes`, distinguished by a
 - An Episode intersecting two local dates refreshes **both** day projections. A day
   projection selects episodes by UTC-range intersection with the day's bounds;
   `local_date` on an episode row is a derived projection hint, never authority.
-- User-facing conversation events (`conversation.complete` and everything riding on
-  it) split: memory fires from the first non-open conversational Episode revision;
-  user-facing completion plugins wait for settlement. Each fires exactly once per
-  `(episode_key, event_type)`. Resettlement or supersession never re-fires them.
+- `conversation.complete` fires once per recording when it closes (audio persisted,
+  transcript saved), independent of reconciliation. Episode-level work splits off:
+  memory fires from the first non-open conversational Episode revision; settlement
+  publishes `episode.settled` (merged transcript, title, summary, member ids). Each
+  fires exactly once per `(episode_key, event_type)`. Resettlement or supersession
+  never re-fires them.
 
 ## Settlement is a policy decision
 
@@ -267,8 +269,8 @@ The speech gate decides when speech-bearing audio exists; it no longer decides t
 conversation happened. At recording close, Chronicle still runs every evidence
 producer — transcription, speaker identification, VAD profiling, summary — and marks
 the range dirty, and still writes the provisional Conversation source record for
-retrieval freshness. What it no longer does is dispatch `conversation.complete` or
-the per-conversation consolidated memory write.
+retrieval freshness, and dispatches `conversation.complete` for that recording. What
+it no longer does is the per-conversation consolidated memory write.
 
 The reconciler classifies each Episode. A fine-grained `kind` (meeting, chat, call,
 media, dictation, noise, …) serves timeline display; dispatch keys on the single
