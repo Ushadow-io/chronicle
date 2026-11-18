@@ -338,7 +338,7 @@ async def test_monitor_projects_live_mongo_and_sse_to_conversation_clock(
     create_live = AsyncMock()
     update_live = AsyncMock()
     publish_sse = Mock()
-    plugin_router = SimpleNamespace(dispatch_event=AsyncMock(return_value=[]))
+    dispatch_live = AsyncMock(return_value=[])
     monkeypatch.setattr(conversation_jobs, "Conversation", _LiveConversationModel)
     monkeypatch.setattr(conversation_jobs, "SessionStore", lambda _redis: object())
     monkeypatch.setattr(conversation_jobs, "get_live_segmentation", lambda: "provider")
@@ -373,7 +373,9 @@ async def test_monitor_projects_live_mongo_and_sse_to_conversation_clock(
     )
     monkeypatch.setattr(conversation_jobs, "_update_live_transcript", update_live)
     monkeypatch.setattr(conversation_jobs, "publish_sse_event", publish_sse)
-    monkeypatch.setattr(conversation_jobs, "get_plugin_router", lambda: plugin_router)
+    monkeypatch.setattr(
+        conversation_jobs, "dispatch_or_defer_space_event", dispatch_live
+    )
 
     state = conversation_jobs.ConversationState(
         conversation_id="conversation-1",
@@ -412,7 +414,13 @@ async def test_monitor_projects_live_mongo_and_sse_to_conversation_clock(
     assert live_event["timestamp_clock"] == "conversation"
     assert live_event["timestamp_rebase_seconds"] == pytest.approx(4.624)
     assert live_event["capture_session_id"] == "session-1"
-    plugin_event = plugin_router.dispatch_event.await_args.kwargs["data"]
+    dispatched = dispatch_live.await_args.kwargs
+    assert dispatched["event"] == conversation_jobs.PluginEvent.TRANSCRIPT_STREAMING
+    assert dispatched["user_id"] == "user-1"
+    assert dispatched["memory_space_id"] is None
+    plugin_event = dispatched["data"]
+    assert plugin_event["conversation_id"] == "conversation-1"
+    assert plugin_event["capture_session_id"] == "session-1"
     assert plugin_event["segments"][0]["start"] == pytest.approx(2.08)
     assert plugin_event["source_timestamp_clock"] == "capture_session"
     assert plugin_event["timestamp_clock"] == "conversation"
@@ -474,7 +482,7 @@ async def test_monitor_withholds_timed_live_outputs_when_clock_prefix_is_unprove
     create_live = AsyncMock()
     update_live = AsyncMock()
     publish_sse = Mock()
-    plugin_router = SimpleNamespace(dispatch_event=AsyncMock(return_value=[]))
+    dispatch_live = AsyncMock(return_value=[])
     resolve_clock = AsyncMock(
         side_effect=conversation_jobs.AudioClaimError("incomplete audio-clock prefix")
     )
@@ -510,7 +518,9 @@ async def test_monitor_withholds_timed_live_outputs_when_clock_prefix_is_unprove
     )
     monkeypatch.setattr(conversation_jobs, "_update_live_transcript", update_live)
     monkeypatch.setattr(conversation_jobs, "publish_sse_event", publish_sse)
-    monkeypatch.setattr(conversation_jobs, "get_plugin_router", lambda: plugin_router)
+    monkeypatch.setattr(
+        conversation_jobs, "dispatch_or_defer_space_event", dispatch_live
+    )
 
     state = conversation_jobs.ConversationState(
         conversation_id="conversation-1",
@@ -529,7 +539,7 @@ async def test_monitor_withholds_timed_live_outputs_when_clock_prefix_is_unprove
     resolve_clock.assert_awaited_once_with(state)
     create_live.assert_not_awaited()
     update_live.assert_not_awaited()
-    plugin_router.dispatch_event.assert_not_awaited()
+    dispatch_live.assert_not_awaited()
     assert not any(
         call.args[1] == "transcript.live" for call in publish_sse.call_args_list
     )

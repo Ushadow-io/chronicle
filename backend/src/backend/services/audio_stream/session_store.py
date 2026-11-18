@@ -417,6 +417,11 @@ class SessionStore:
         await self._redis.hincrby(key, "chunks_published", 1)
         await self._redis.hset(key, "last_chunk_at", str(time.time()))
 
+    async def mark_audio_inflow(self, session_id: str) -> None:
+        """Refresh last_chunk_at only: audio reached the session (protocol v2 packets,
+        which do not go through the v1 producer's bump_chunk_count)."""
+        await self._redis.hset(self._key(session_id), "last_chunk_at", str(time.time()))
+
     async def expire_session(self, session_id: str, ttl: int) -> None:
         await self._redis.expire(self._key(session_id), ttl)
 

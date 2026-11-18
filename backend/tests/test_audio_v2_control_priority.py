@@ -24,6 +24,7 @@ from backend.audio_contract.v2.codec import (
 )
 from backend.controllers import audio_v2_controller as controller
 from backend.routers.modules.websocket_routes import audio_v2_endpoint
+from backend.services.audio_stream.session_store import SessionStore
 from backend.services.audio_stream.v2_streams import parse_stream_event
 from backend.services.interaction_modes.voice import runtime
 from backend.services.response_coordinator import StaleResponse
@@ -67,7 +68,11 @@ async def test_playback_ack_bypasses_stalled_capture_but_stop_drains_in_order(
         data_purpose=None,
         socket_id=None,
     )
-    producer = SimpleNamespace(redis_client=redis, update_session_job_ids=AsyncMock())
+    producer = SimpleNamespace(
+        redis_client=redis,
+        store=SessionStore(redis),
+        update_session_job_ids=AsyncMock(),
+    )
     entered, release, acknowledged, finalized = (asyncio.Event() for _ in range(4))
     order = []
     finalization_details = []

@@ -16,6 +16,7 @@ from backend.audio_contract.v2.codec import (
 )
 from backend.controllers import audio_v2_controller
 from backend.routers.modules.websocket_routes import audio_v2_endpoint
+from backend.services.audio_stream.session_store import SessionStore
 from backend.services.audio_stream.v2_streams import parse_stream_event
 from backend.services.response_coordinator import StaleResponse
 
@@ -219,6 +220,7 @@ async def test_registered_audio_websocket_accepts_phone_frame_and_stops(
     )
     producer = SimpleNamespace(
         redis_client=redis_client,
+        store=SessionStore(redis_client),
         update_session_job_ids=AsyncMock(),
     )
 
@@ -326,3 +328,5 @@ async def test_registered_audio_websocket_accepts_phone_frame_and_stops(
         "ended",
     ]
     assert durable_events[1].frame.pcm_s16le == bytes(640)
+    # An accepted packet refreshes the audio-inflow mark the idle watchdogs read.
+    assert await producer.store.get_last_chunk_at("capture-1") is not None

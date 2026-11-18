@@ -63,7 +63,6 @@ from backend.services.memory import get_memory_service
 from backend.services.plugin_service import (
     dispatch_or_defer_space_event,
     dispatch_plugin_event,
-    get_plugin_router,
 )
 from backend.services.processing_artifacts import (
     persist_conversation_revision,
@@ -1281,47 +1280,18 @@ async def _monitor_conversation_loop(
                             and live_clock_metadata is not None
                         ):
                             try:
-                                plugin_router = get_plugin_router()
-                                if plugin_router:
-                                    transcript_text = combined.get("text", "")
-                                    if transcript_text:
-                                        plugin_data = {
-                                            "transcript": transcript_text,
-                                            "segment_id": f"{state.session_id}_{current_count}",
-                                            "conversation_id": state.conversation_id,
-                                            "segments": live_segments,
-                                            "word_count": speech_analysis.get(
-                                                "word_count", 0
-                                            ),
-                                            **live_clock_metadata,
-                                        }
-                                        logger.info(
-                                            f"🔌 DISPATCH: transcript.streaming event "
-                                            f"(conversation={state.conversation_id[:12]}, "
-                                            f"segment_id={state.session_id}_{current_count})"
-                                        )
-                                        plugin_results = (
-                                            await plugin_router.dispatch_event(
-                                                event=PluginEvent.TRANSCRIPT_STREAMING,
-                                                user_id=state.user_id,
-                                                data=plugin_data,
-                                                metadata={"client_id": state.client_id},
-                                            )
-                                        )
-                                        logger.info(
-                                            f"🔌 RESULT: transcript.streaming dispatched to "
-                                            f"{len(plugin_results) if plugin_results else 0} plugins"
-                                        )
-                                        if plugin_results:
-                                            for result in plugin_results:
-                                                if result.message:
-                                                    logger.info(
-                                                        f"  Plugin: {result.message}"
-                                                    )
-                                                if not result.should_continue:
-                                                    logger.info(
-                                                        f"  Plugin stopped normal processing"
-                                                    )
+                                await _dispatch_live_transcript(
+                                    state,
+                                    combined.get("text", ""),
+                                    live_segments,
+                                    {
+                                        "segment_id": f"{state.session_id}_{current_count}",
+                                        "word_count": speech_analysis.get(
+                                            "word_count", 0
+                                        ),
+                                        **live_clock_metadata,
+                                    },
+                                )
                             except Exception as e:
                                 logger.warning(
                                     f"⚠️ Error triggering transcript-level plugins: {e}"
@@ -1600,6 +1570,38 @@ def _streaming_clock_metadata(
         "timestamp_rebase_seconds": float(timestamp_rebase_seconds),
         "capture_session_id": capture_session_id,
     }
+
+
+async def _dispatch_live_transcript(
+    state: ConversationState,
+    transcript_text: str,
+    live_segments: list,
+    extra: dict[str, Any],
+) -> Optional[list]:
+    """Send the open Conversation's live transcript to plugins as transcript.streaming.
+
+    This job runs in an RQ worker process, where the plugin router exists only after
+    ``ensure_plugin_router`` (inside ``dispatch_plugin_event``) has built it. The
+    space-aware dispatcher also applies the privacy guard and keeps streaming events
+    out of isolated memory spaces, exactly as for the other worker events.
+    """
+    if not transcript_text:
+        return None
+    return await dispatch_or_defer_space_event(
+        event=PluginEvent.TRANSCRIPT_STREAMING,
+        user_id=state.user_id,
+        memory_space_id=state.memory_space_id or None,
+        source_kind="conversation",
+        source_id=state.conversation_id,
+        data={
+            "transcript": transcript_text,
+            "conversation_id": state.conversation_id,
+            "segments": live_segments,
+            **extra,
+        },
+        metadata={"client_id": state.client_id},
+        description=f"conversation={state.conversation_id[:12]}, live",
+    )
 
 
 async def _resolve_live_capture_clock_offset(state: ConversationState) -> float:

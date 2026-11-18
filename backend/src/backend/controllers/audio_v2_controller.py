@@ -59,6 +59,7 @@ from backend.services.voice_diagnostics import VoiceCadenceRecorder, cadence_spa
 from backend.services.voice_sessions import VoiceSessionCoordinator, VoiceSessionError
 
 AUDIO_SUBPROTOCOL = "chronicle.audio.v2"
+AUDIO_INFLOW_MARK_SECONDS = 1.0
 logger = logging.getLogger(__name__)
 _memory_scopes = MemoryScopeResolver()
 
@@ -724,6 +725,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
         last_sequence = -1
         last_monotonic_offset_us = None
         canonical_sequence = 0
+        last_inflow_mark = 0.0
         while True:
             incoming = await capture_input.receive()
             if incoming.get("type") == "websocket.disconnect":
@@ -976,6 +978,16 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                 )
                 last_sequence = packet.sequence
                 last_monotonic_offset_us = packet.monotonic_offset_us
+                # The conversation and speech-detection idle watchdogs read
+                # last_chunk_at as "audio still arriving". Refresh it (at most once
+                # per AUDIO_INFLOW_MARK_SECONDS), or a live conversation is closed as
+                # "device stopped streaming" 30 s after capture start.
+                now = time.monotonic()
+                if now - last_inflow_mark >= AUDIO_INFLOW_MARK_SECONDS:
+                    await producer.store.mark_audio_inflow(
+                        client_state.stream_session_id
+                    )
+                    last_inflow_mark = now
             else:
                 raise AudioProtocolV2Error("unsupported WebSocket message")
     except WebSocketDisconnect:
