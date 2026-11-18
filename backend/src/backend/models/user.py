@@ -8,6 +8,7 @@ from beanie import Document, PydanticObjectId
 from fastapi_users.db import BeanieBaseUser, BeanieUserDatabase
 from fastapi_users.schemas import BaseUser, BaseUserCreate, BaseUserUpdate
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pymongo import IndexModel
 
 logger = logging.getLogger(__name__)
 
@@ -115,10 +116,23 @@ class User(BeanieBaseUser, Document):
     # service). Each allowed speaker is {speaker_id, name}. Empty list = inert.
     wakeword_gate_enabled: bool = False
     wakeword_allowed_speakers: list[dict] = Field(default_factory=list)
+    # OIDC `sub` (e.g. Casdoor user id) this account signs in as; see backend/oidc.py.
+    # Same field name the shared `users` collection already uses.
+    oidc_sub: Optional[str] = None
 
     class Settings:
         name = "users"  # Collection name in MongoDB - standardized from "fastapi_users"
         email_collation = {"locale": "en", "strength": 2}  # Case-insensitive comparison
+        indexes = [
+            # Partial, not sparse: saves write `oidc_sub: null`, which a sparse index still
+            # indexes, so a sparse unique index would refuse a second unlinked user.
+            IndexModel(
+                "oidc_sub",
+                name="oidc_sub_unique",
+                unique=True,
+                partialFilterExpression={"oidc_sub": {"$type": "string"}},
+            ),
+        ]
 
     @property
     def user_id(self) -> str:
@@ -215,6 +229,11 @@ async def get_user_by_id(user_id: str) -> Optional[User]:
         logger.error(f"Failed to get user by ID {user_id}: {e}")
         # Re-raise for proper error handling upstream
         raise
+
+
+async def get_user_by_oidc_sub(sub: str) -> Optional[User]:
+    """The account linked to this OIDC subject, or None."""
+    return await User.find_one({"oidc_sub": sub})
 
 
 async def get_user_by_client_id(client_id: str) -> Optional[User]:

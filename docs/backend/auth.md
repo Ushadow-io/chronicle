@@ -4,6 +4,9 @@
 
 Chronicle uses a comprehensive authentication system built on `fastapi-users` with support for multiple authentication methods including JWT tokens and cookies. The system provides secure user management with proper data isolation and role-based access control using MongoDB ObjectIds for user identification.
 
+Standard OIDC access tokens (e.g. Casdoor) are accepted as bearers too when configured: see
+[OIDC login](../oidc-login.md).
+
 ## Architecture Components
 
 ### 1. User Model (`users.py`)

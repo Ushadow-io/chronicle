@@ -23,6 +23,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 
 - [Compose stack](backend/compose-stack.md): the backend's containers, shared mounts, and profiles
 - [Authentication](backend/auth.md): user identity, JWTs, and protected endpoints
+- [OIDC login](oidc-login.md): Casdoor/OIDC access tokens as bearers, and how they map to users
 - [Memory system](backend/memories.md): agentic Markdown vault and retrieval
 - [Memory segmentation and storage](backend/memory-segmentation-storage.md): multimodal evidence shaping, semantic episodes, and the Mongo/vault boundary
 - [Semantic timeline episodes](backend/timeline-episodes.md): evidence compaction, agent analysis, and revisioned day views

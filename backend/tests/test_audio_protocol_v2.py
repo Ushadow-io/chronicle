@@ -53,6 +53,29 @@ def test_raw_opus_normalizer_splits_one_neo_packet_into_canonical_frames():
     assert all(len(frame) == 640 for frame in frames)
 
 
+def _hello(token: str) -> str:
+    return serialize_client_control_json(
+        audio_pb2.ClientControl(
+            event_id=audio_pb2.EventId(value="hello-1"),
+            sent_at=_timestamp(),
+            hello=audio_pb2.ClientHello(
+                bearer_token=token,
+                source_id=audio_pb2.CaptureSourceId(value="phone-1"),
+                device_kind=audio_pb2.DEVICE_KIND_IOS_PHONE,
+            ),
+        )
+    )
+
+
+def test_hello_accepts_an_oidc_sized_bearer_but_not_an_unbounded_one():
+    # Casdoor access tokens carry the user object: kilobytes, far past an id's 255.
+    assert (
+        parse_client_control_json(_hello("t" * 3_000)).hello.bearer_token == "t" * 3_000
+    )
+    with pytest.raises(AudioProtocolV2Error, match="bearer_token"):
+        parse_client_control_json(_hello("t" * (16 * 1024 + 1)))
+
+
 def test_uplink_spec_accepts_only_declared_20_or_60_ms_packets():
     validate_audio_spec(_spec(), live_uplink=True)
     sixty_ms = _spec()

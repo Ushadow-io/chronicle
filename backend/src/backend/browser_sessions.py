@@ -14,11 +14,16 @@ from urllib.parse import urlsplit
 from beanie import Document, PydanticObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi_users.authentication import JWTStrategy
 from fastapi_users.exceptions import UserNotExists
 from pymongo import IndexModel
 
-from .auth import SECRET_KEY, UserManager, get_jwt_strategy, get_user_manager
+from .auth import (
+    SECRET_KEY,
+    UserManager,
+    get_jwt_strategy,
+    get_user_manager,
+    read_oidc_or_own_jwt,
+)
 from .models.api_key import TOKEN_SCHEME
 
 COOKIE_NAME = "chronicle_session"
@@ -119,14 +124,15 @@ async def exchange(
     """Trade a bearer JWT for a browser session (single sign-on handoff).
 
     A host such as Ushadow mints a JWT for the user with the shared signing key
-    and opens the WebUI with it; the WebUI calls this once so renewal works like
-    a password sign-in. API keys are refused: they are long-lived machine
-    credentials, not an interactive sign-in.
+    (or passes the user's OIDC access token, see oidc.py) and opens the WebUI
+    with it; the WebUI calls this once so renewal works like a password sign-in.
+    API keys are refused: they are long-lived machine credentials, not an
+    interactive sign-in.
     """
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
     if scheme.lower() != "bearer" or not token or token.startswith(f"{TOKEN_SCHEME}_"):
         raise HTTPException(401, "Bearer JWT required")
-    user = await JWTStrategy.read_token(get_jwt_strategy(), token, manager)
+    user = await read_oidc_or_own_jwt(get_jwt_strategy(), token, manager)
     if user is None or not user.is_active:
         raise HTTPException(401, "Invalid or expired token")
     return await start_session(user, request, response, manager)

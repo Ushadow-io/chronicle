@@ -14,6 +14,9 @@ from google.protobuf.message import DecodeError, Message
 from . import audio_pb2
 
 MAX_CONTROL_BYTES = 64 * 1024
+# A bearer is a credential, not an id: OIDC access tokens (Casdoor puts the user object in
+# them) are routinely 1-3 KB, so the 255-character id limit would refuse every one.
+MAX_BEARER_TOKEN_CHARS = 16 * 1024
 MAX_MEDIA_BYTES = 4 * 1024
 MAX_RAW_OPUS_PACKET_BYTES = 1_500
 _OGG_CAPTURE_PATTERN = b"OggS"
@@ -89,7 +92,11 @@ def parse_client_control_json(payload: str) -> audio_pb2.ClientControl:
         raise AudioProtocolV2Error("ClientControl requires sent_at")
     event = _require_event(message)
     if event == "hello":
-        _require_id(message.hello.bearer_token, "bearer_token")
+        token = message.hello.bearer_token
+        if not token or len(token) > MAX_BEARER_TOKEN_CHARS:
+            raise AudioProtocolV2Error(
+                f"bearer_token must contain 1-{MAX_BEARER_TOKEN_CHARS} characters"
+            )
         _require_id(message.hello.source_id.value, "source_id")
         if message.hello.device_kind == audio_pb2.DEVICE_KIND_UNSPECIFIED:
             raise AudioProtocolV2Error("hello requires device_kind")

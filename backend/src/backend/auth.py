@@ -9,7 +9,7 @@ from typing import Literal, Optional, overload
 import jwt
 from beanie import PydanticObjectId
 from dotenv import load_dotenv
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from fastapi_users import BaseUserManager, FastAPIUsers
 from fastapi_users.authentication import (
     AuthenticationBackend,
@@ -19,6 +19,7 @@ from fastapi_users.authentication import (
 )
 
 from backend.models.api_key import resolve_api_key, touch_api_key
+from backend.oidc import OIDCUnavailableError, read_oidc_token
 from backend.users import User, UserCreate, get_user_by_id, get_user_db
 
 logger = logging.getLogger(__name__)
@@ -106,15 +107,39 @@ cookie_transport = CookieTransport(
 bearer_transport = BearerTransport(tokenUrl="auth/jwt/login")
 
 
+AUTH_UNAVAILABLE_DETAIL = "Sign-in provider unavailable, retry shortly"
+
+
+async def read_oidc_or_own_jwt(
+    strategy: JWTStrategy, token: Optional[str], user_manager
+) -> Optional[User]:
+    """An OIDC access token from the configured issuer (backend/oidc.py), else our own JWT.
+
+    A token whose ``iss`` is the OIDC issuer is judged by OIDC alone, never by the HS256 check.
+    An unreachable JWKS is a 503, not "invalid credentials".
+    """
+    if token:
+        try:
+            handled, user = await read_oidc_token(token)
+        except OIDCUnavailableError as exc:
+            raise HTTPException(
+                status_code=503, detail=AUTH_UNAVAILABLE_DETAIL
+            ) from exc
+        if handled:
+            return user
+    return await JWTStrategy.read_token(strategy, token, user_manager)
+
+
 class ApiKeyOrJWTStrategy(JWTStrategy):
-    """JWT strategy that also accepts long-lived API keys.
+    """JWT strategy that also accepts long-lived API keys and OIDC access tokens.
 
     Bearer credentials arrive on the same header regardless of type, so the
     token itself discriminates: anything shaped like ``chrn_<prefix>_<secret>``
-    is looked up in the api_keys collection, everything else is verified as a
-    JWT. Subclassing JWTStrategy (rather than adding a second authentication
+    is looked up in the api_keys collection, a token issued by the configured
+    OIDC issuer is verified against its JWKS, everything else is verified as our
+    own JWT. Subclassing JWTStrategy (rather than adding a second authentication
     backend) means every existing entry point — ``current_active_user``,
-    ``websocket_auth``, ``get_user_from_token_param`` — accepts API keys
+    ``websocket_auth``, ``get_user_from_token_param`` — accepts them all
     without further change, and token *issuance* on login stays pure JWT.
     """
 
@@ -131,7 +156,7 @@ class ApiKeyOrJWTStrategy(JWTStrategy):
                     f"inactive user {api_key.user_id}"
                 )
                 return None
-        return await super().read_token(token, user_manager)
+        return await read_oidc_or_own_jwt(self, token, user_manager)
 
 
 def get_jwt_strategy() -> ApiKeyOrJWTStrategy:
@@ -219,6 +244,8 @@ async def get_user_from_token_param(token: str) -> Optional[User]:
         user = await strategy.read_token(token, user_manager)
         if user and user.is_active:
             return user
+    except HTTPException:
+        raise  # sign-in provider unavailable: 503, not "invalid token"
     except Exception:
         pass
     return None
@@ -308,7 +335,8 @@ async def websocket_auth(
     Returns:
         tuple of (User or None, failure_reason string).
         failure_reason is empty string on success, or one of:
-        "token_expired", "user_not_found", "token_invalid", "no_credentials"
+        "token_expired", "user_not_found", "token_invalid", "no_credentials",
+        "auth_unavailable" (OIDC issuer keys could not be fetched; retry, not a bad token)
     """
     strategy = get_jwt_strategy()
 
@@ -337,6 +365,13 @@ async def websocket_auth(
                         f"WebSocket auth failed: user inactive or not found (user={user})"
                     )
                     return None, "user_not_found"
+        except HTTPException as e:
+            if e.status_code == 503:
+                logger.warning(
+                    "WebSocket auth unavailable: OIDC signing keys unreachable"
+                )
+                return None, "auth_unavailable"
+            return None, "token_invalid"
         except Exception as e:
             logger.error(
                 f"WebSocket auth with query token failed: {type(e).__name__}: {e}",

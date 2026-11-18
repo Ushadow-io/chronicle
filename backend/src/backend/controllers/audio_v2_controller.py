@@ -662,16 +662,25 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
         if hello_control.WhichOneof("event") != "hello":
             raise AudioProtocolV2Error("first control must be ClientHello")
         hello = hello_control.hello
-        user, _failure = await websocket_auth(websocket, hello.bearer_token)
+        user, failure = await websocket_auth(websocket, hello.bearer_token)
         if user is None:
+            # An unreachable sign-in provider is retryable, not a bad credential.
+            unavailable = failure == "auth_unavailable"
+            detail = (
+                "authentication unavailable" if unavailable else "authentication failed"
+            )
             await send_control(
                 error=audio_pb2.ProtocolError(
-                    code=audio_pb2.PROTOCOL_ERROR_CODE_AUTHENTICATION_FAILED,
-                    detail="authentication failed",
+                    code=(
+                        audio_pb2.PROTOCOL_ERROR_CODE_INTERNAL
+                        if unavailable
+                        else audio_pb2.PROTOCOL_ERROR_CODE_AUTHENTICATION_FAILED
+                    ),
+                    detail=detail,
                     rejected_event_id=hello_control.event_id,
                 ),
             )
-            await websocket.close(code=1008, reason="authentication failed")
+            await websocket.close(code=1013 if unavailable else 1008, reason=detail)
             return
 
         device_name = hello.display_name or hello.source_id.value
